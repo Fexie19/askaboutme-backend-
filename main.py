@@ -27,7 +27,7 @@ CONVERSATIONS = {}
 # Timestamp (time.time()) pesan terakhir yang masuk per username
 LAST_ACTIVITY = {}
 # Maximum number of messages to keep per conversation (includes system entry)
-MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "15"))
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "8"))
 # Kalau user diam lebih lama dari ini (detik), conversation-nya otomatis di-reset
 # saat dia kirim pesan lagi. Ini juga yang menjaga jumlah token per request tetap
 # kecil karena history lama/basi tidak ikut menumpuk dan terkirim terus.
@@ -325,7 +325,7 @@ def generate_ai_response(username: str, message: str) -> str:
             messages=messages,
             model=os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
             max_completion_tokens=MAX_COMPLETION_TOKENS,
-            temperature=0.7,
+            temperature=0.3,
         )
 
         if getattr(completion, "choices", None):
