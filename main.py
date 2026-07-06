@@ -1,5 +1,6 @@
 import os
 import smtplib
+import time
 from email.message import EmailMessage
 import re
 
@@ -14,11 +15,49 @@ app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 DEFAULT_GROQ_MODEL = os.environ.get("GROQ_MODEL", "groq/compound")
+# Batas token yang boleh dibuat model per jawaban (bisa diatur lewat .env tanpa ubah kode)
+MAX_COMPLETION_TOKENS = int(os.environ.get("GROQ_MAX_TOKENS", "512"))
 
 # In-memory conversation store: username -> list of messages
 CONVERSATIONS = {}
+# Timestamp (time.time()) pesan terakhir yang masuk per username
+LAST_ACTIVITY = {}
 # Maximum number of messages to keep per conversation (includes system entry)
-MAX_HISTORY_MESSAGES = 15
+MAX_HISTORY_MESSAGES = int(os.environ.get("MAX_HISTORY_MESSAGES", "15"))
+# Kalau user diam lebih lama dari ini (detik), conversation-nya otomatis di-reset
+# saat dia kirim pesan lagi. Ini juga yang menjaga jumlah token per request tetap
+# kecil karena history lama/basi tidak ikut menumpuk dan terkirim terus.
+INACTIVITY_RESET_SECONDS = int(os.environ.get("INACTIVITY_RESET_SECONDS", "60"))
+
+# Cache isi Algoritma.txt di memori supaya tidak buka file setiap kali ada
+# conversation baru/reset.
+_SYSTEM_PROMPT_CACHE = None
+
+
+def _load_system_prompt() -> str:
+    global _SYSTEM_PROMPT_CACHE
+    if _SYSTEM_PROMPT_CACHE is None:
+        try:
+            with open("Algoritma.txt", "r", encoding="utf-8") as f:
+                _SYSTEM_PROMPT_CACHE = f.read()
+        except Exception:
+            _SYSTEM_PROMPT_CACHE = ""
+    return _SYSTEM_PROMPT_CACHE
+
+
+def _new_conversation() -> list:
+    return [{"role": "system", "content": _load_system_prompt()}]
+
+
+def _ensure_active_conversation(username: str) -> None:
+    """Pastikan username sudah punya conversation. Kalau user sudah tidak
+    kirim pesan selama lebih dari INACTIVITY_RESET_SECONDS, conversation lama
+    dibuang dan mulai lagi dari system prompt (konteks fresh + hemat token)."""
+    now = time.time()
+    last_seen = LAST_ACTIVITY.get(username)
+    if username not in CONVERSATIONS or (last_seen is not None and now - last_seen > INACTIVITY_RESET_SECONDS):
+        CONVERSATIONS[username] = _new_conversation()
+    LAST_ACTIVITY[username] = now
 
 
 @app.route("/", methods=["GET"])
@@ -41,14 +80,8 @@ def ask_ai():
             "message": "Pesan AI tidak boleh kosong."
         }), 400
 
-    # Ensure conversation exists for this username (preserve topic across requests)
-    if username not in CONVERSATIONS:
-        try:
-            with open("Algoritma.txt", "r", encoding="utf-8") as f:
-                algoritma = f.read()
-        except Exception:
-            algoritma = ""
-        CONVERSATIONS[username] = [{"role": "system", "content": algoritma}]
+    # Pastikan conversation ada; otomatis reset kalau user idle > 1 menit
+    _ensure_active_conversation(username)
 
     answer = generate_ai_response(username, message)
 
@@ -69,13 +102,8 @@ def reset_conversation():
     if not username:
         return jsonify({"status": "error", "message": "username required"}), 400
 
-    try:
-        with open("Algoritma.txt", "r", encoding="utf-8") as f:
-            algoritma = f.read()
-    except Exception:
-        algoritma = ""
-
-    CONVERSATIONS[username] = [{"role": "system", "content": algoritma}]
+    CONVERSATIONS[username] = _new_conversation()
+    LAST_ACTIVITY[username] = time.time()
     return jsonify({"status": "success", "message": "conversation reset"}), 200
 
 
@@ -117,7 +145,7 @@ def has_datetime_details(text: str) -> bool:
             return False
         return True
 
-    # numeric time like '3', '15:00', '3 pm' etc — look for digits near 'jam' or standalone hh:mm
+    # numeric time like '3', '15:00', '3 pm' etc â€” look for digits near 'jam' or standalone hh:mm
     if re.search(r"\bjam\s*\d{1,2}\b", s) or re.search(r"\b\d{1,2}:\d{2}\b", s):
         return True
 
@@ -167,57 +195,31 @@ def trigger_invitation_email(username: str, message: str, ai_answer: str, summar
 
 
 def summarize_invitation_text(message: str, ai_answer: str = None) -> str:
-    """Return a short, explicit Indonesian explanation of the invitation.
+    """Ringkasan singkat undangan untuk isi email notifikasi internal.
 
-    The summary should explain: 1) apakah ini ajakan/undangan, 2) kegiatan/tujuan (apa), 3) lokasi atau platform jika disebut (ke mana), 4) waktu yang disebut atau 'tidak disebutkan', dan 5) siapa pengundang jika jelas. Output 1-3 kalimat, nada netral.
+    Versi lama memanggil Groq LAGI di sini (1 request + token tambahan) padahal
+    hasilnya cuma masuk ke badan email dan tidak pernah dibaca user. Versi ini
+    menyusun ringkasan langsung dari heuristik yang sudah ada di file ini
+    (has_datetime_details), jadi 0 request tambahan ke Groq.
     """
-    try:
-        client = get_groq_client()
-        prompt_parts = [
-            {
-                "role": "system",
-                "content": (
-                    "Anda adalah asisten yang membuat PENJELASAN singkat (1-3 kalimat) tentang sebuah ajakan/undangan. "
-                    "Jelaskan secara eksplisit: (a) apakah ini ajakan/undangan, (b) kegiatan atau tujuan (apa yang akan dilakukan), "
-                    "(c) lokasi atau platform jika disebut (ke mana), (d) waktu yang disebut atau 'tidak disebutkan', dan (e) siapa pengundang jika jelas. "
-                    "Jika suatu informasi tidak disebutkan dalam pesan asli, tuliskan 'tidak disebutkan' untuk bagian tersebut. "
-                    "Tulis dalam bahasa Indonesia, nada netral dan ringkas."
-                ),
-            },
-            {"role": "user", "content": f"Pesan pengguna:\n{message}"},
-        ]
-        if ai_answer:
-            prompt_parts.append({"role": "user", "content": f"AI menjawab:\n{ai_answer}\nJika relevan, sertakan konteks singkat dari jawaban AI."})
-
-        completion = client.chat.completions.create(
-            messages=prompt_parts,
-            model=os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
-            max_completion_tokens=160,
-            temperature=0.15,
-        )
-
-        if getattr(completion, "choices", None):
-            first_choice = completion.choices[0]
-            if getattr(first_choice, "message", None) is not None:
-                return getattr(first_choice.message, "content", "").strip()
-
-        return "(ringkasan gagal dibuat)"
-    except Exception:
-        return "(ringkasan gagal dibuat)"
+    waktu = "disebutkan dalam pesan" if has_datetime_details(message) else "tidak disebutkan secara eksplisit"
+    lines = [
+        "Pesan terdeteksi sebagai ajakan/undangan.",
+        f"Detail waktu: {waktu}.",
+        f"Isi pesan asli: {message.strip()}",
+    ]
+    if ai_answer:
+        lines.append(f"Respon AI ke user: {ai_answer.strip()}")
+    return " ".join(lines)
 
 
 def generate_ai_response(username: str, message: str) -> str:
     try:
         client = get_groq_client()
 
-        # Ensure conversation exists (should be initialized in ask_ai)
-        if username not in CONVERSATIONS:
-            try:
-                with open("Algoritma.txt", "r", encoding="utf-8") as f:
-                    algoritma = f.read()
-            except Exception:
-                algoritma = ""
-            CONVERSATIONS[username] = [{"role": "system", "content": algoritma}]
+        # Safety net kalau fungsi ini dipanggil tanpa lewat /api/ask dulu;
+        # sekaligus menerapkan aturan auto-reset saat idle > 1 menit.
+        _ensure_active_conversation(username)
 
         # Append user message to conversation history
         user_entry = {"role": "user", "content": f"User: {username}\nMessage: {message}"}
@@ -245,8 +247,8 @@ def generate_ai_response(username: str, message: str) -> str:
 
         completion = client.chat.completions.create(
             messages=messages,
-            model=os.environ.get("GROQ_MODEL", "groq/compound"),
-            max_completion_tokens=512,
+            model=os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
+            max_completion_tokens=MAX_COMPLETION_TOKENS,
             temperature=0.7,
         )
 
