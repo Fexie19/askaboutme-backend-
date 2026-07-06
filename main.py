@@ -152,6 +152,8 @@ def has_datetime_details(text: str) -> bool:
     return False
 
 
+import traceback
+
 def send_notification_email(subject: str, body: str) -> bool:
     smtp_host = "smtp.gmail.com"
     smtp_port = 465
@@ -169,13 +171,16 @@ def send_notification_email(subject: str, body: str) -> bool:
     message.set_content(body)
 
     try:
-        with smtplib.SMTP(smtp_host, smtp_port) as server:
-            server.starttls()
+        with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=20) as server:
             server.login(smtp_user, smtp_pass)
             server.send_message(message)
         return True
-    except Exception:
+
+    except Exception as e:
+        traceback.print_exc()
+        print(repr(e))
         return False
+
 
 
 def trigger_invitation_email(username: str, message: str, ai_answer: str, summary: str = "") -> bool:
