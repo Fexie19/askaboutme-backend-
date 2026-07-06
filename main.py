@@ -1,6 +1,10 @@
 import os
 import smtplib
 import time
+import json
+import traceback
+import urllib.request
+import urllib.error
 from email.message import EmailMessage
 import re
 
@@ -152,9 +156,72 @@ def has_datetime_details(text: str) -> bool:
     return False
 
 
-import traceback
-
 def send_notification_email(subject: str, body: str) -> bool:
+    """Kirim email notifikasi.
+
+    Railway (plan Free/Trial/Hobby) memblokir SEMUA outbound SMTP (port 25,
+    465, 587, 2525) untuk mencegah abuse. Ini yang bikin smtplib selalu gagal
+    connect di server walau kredensial & kode sudah benar — kalau dites dari
+    laptop/lokal tetap jalan normal karena ISP rumah tidak memblokir port itu,
+    jadi kelihatannya seperti "bug" padahal itu firewall Railway.
+
+    Fix: kirim lewat Resend (https://resend.com), yang pakai HTTPS API biasa
+    (port 443) — port ini tidak diblokir platform manapun, termasuk semua
+    plan Railway. Kalau RESEND_API_KEY belum di-set di .env, otomatis fallback
+    ke SMTP biasa (berguna kalau nanti pindah host lain yang tidak memblokir
+    SMTP, atau upgrade ke Railway plan Pro).
+    """
+    resend_api_key = os.environ.get("RESEND_API_KEY", "").strip()
+    if resend_api_key:
+        return _send_via_resend(subject, body, resend_api_key)
+    return _send_via_smtp(subject, body)
+
+
+def _send_via_resend(subject: str, body: str, api_key: str) -> bool:
+    to_address = os.environ.get("NOTIFY_EMAIL_TO", "").strip()
+    # "from" harus pakai domain yang sudah diverifikasi di Resend. Selama belum
+    # verifikasi domain sendiri, "onboarding@resend.dev" cuma bisa kirim ke
+    # alamat email akun Resend kamu sendiri — cukup untuk notifikasi internal
+    # yang tujuannya memang cuma ke NOTIFY_EMAIL_TO.
+    from_address = os.environ.get("RESEND_FROM", "onboarding@resend.dev").strip()
+
+    if not to_address:
+        return False
+
+    payload = json.dumps({
+        "from": from_address,
+        "to": [to_address],
+        "subject": subject,
+        "text": body,
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=payload,
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        },
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return 200 <= resp.status < 300
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode(errors="ignore")
+        except Exception:
+            detail = ""
+        print("Resend HTTPError:", e.code, detail)
+        return False
+    except Exception as e:
+        traceback.print_exc()
+        print("Resend exception:", repr(e))
+        return False
+
+
+def _send_via_smtp(subject: str, body: str) -> bool:
     smtp_host = "smtp.gmail.com"
     smtp_port = 465
     smtp_user = os.environ.get("SMTP_USER", "").strip()
