@@ -154,7 +154,7 @@ def has_datetime_details(text: str) -> bool:
 
 def send_notification_email(subject: str, body: str) -> bool:
     smtp_host = "smtp.gmail.com"
-    smtp_port = 587
+    smtp_port = 465
     smtp_user = os.environ.get("SMTP_USER", "").strip()
     smtp_pass = os.environ.get("SMTP_PASS", "").strip()
     to_address = os.environ.get("NOTIFY_EMAIL_TO", "").strip()
