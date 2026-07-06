@@ -18,7 +18,7 @@ load_dotenv()
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-DEFAULT_GROQ_MODEL = os.environ.get("GROQ_MODEL", "qwen/qwen3-32b")
+DEFAULT_GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.1-8b-instant")
 # Batas token yang boleh dibuat model per jawaban (bisa diatur lewat .env tanpa ubah kode)
 MAX_COMPLETION_TOKENS = int(os.environ.get("GROQ_MAX_TOKENS", "512"))
 
