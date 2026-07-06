@@ -202,6 +202,10 @@ def _send_via_resend(subject: str, body: str, api_key: str) -> bool:
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            # Cloudflare (di depan api.resend.com) memblokir default User-Agent
+            # bawaan urllib ("Python-urllib/3.x") sebagai bot -> 403 error code: 1010.
+            # Header custom di bawah ini yang menghindari blokir tsb.
+            "User-Agent": "Mozilla/5.0 (compatible; FexieBackend/1.0)",
         },
     )
 
