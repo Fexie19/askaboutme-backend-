@@ -325,7 +325,7 @@ def generate_ai_response(username: str, message: str) -> str:
             messages=messages,
             model=os.environ.get("GROQ_MODEL", DEFAULT_GROQ_MODEL),
             max_completion_tokens=MAX_COMPLETION_TOKENS,
-            temperature=0.5,
+            temperature=0.1,
         )
 
         if getattr(completion, "choices", None):
